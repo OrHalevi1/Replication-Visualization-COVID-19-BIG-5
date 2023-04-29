@@ -1,0 +1,345 @@
+---
+title: "COVID 19 & Big 5"
+output: html_document
+---
+## Load the required libraries
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(plotly)
+library(heatmaply)
+library(showtext)
+library(RColorBrewer)
+library(reshape2)
+```
+
+## Join the training and test sets
+```{r}
+train <- read.csv("./train.csv")
+test <- read.csv("./test.csv")
+test_Sub <- read.csv("./submission.csv")
+country_isos <- read.csv("./wikipedia-iso-country-codes.csv", stringsAsFactors = FALSE)
+
+covid19 <- inner_join(test, test_Sub, by = "ForecastId") |>
+  rename(Id = ForecastId) |>
+  bind_rows(train) |>
+  arrange(Country.Region, Date) |>
+  select(Id, Country.Region, Date, ConfirmedCases)
+
+head(covid19)
+```
+
+## Filter
+
+### Filter to countries that reached at least 50 confirmed cases
+```{r, results='hide'}
+covid19 <- covid19 |> filter(ConfirmedCases > 50)
+```
+
+### Count the number of days for each country
+```{r, results='hide'}
+covid19_numdays <- covid19 |>
+  distinct(Country.Region, Date) |>
+  group_by(Country.Region) |>
+  summarize(num_days = n())
+```
+
+### Filter to countries with at least 14 days of data
+```{r, results='hide'}
+covid19_mindays <- covid19_numdays |>
+  filter(num_days >= 14)
+```
+
+### Filter the original data frame to selected countries
+```{r, results='hide'}
+covid19 <- covid19 |>
+  filter(Country.Region %in% covid19_mindays$Country.Region)
+```
+
+### Count unique countries
+```{r}
+num_countries <- covid19 |>
+  distinct(Country.Region) |>
+  nrow()
+
+cat("Number of selected countries:", num_countries, "\n")
+```
+
+### Print unique countries
+```{r}
+unique_countries <- covid19 |>
+  distinct(Country.Region) |>
+  pull()
+
+cat("Selected countries:", unique_countries, "\n")
+```
+
+## Compute growth over 14 days
+
+### Subset for rows where 'Country/Region' is 'China'
+```{r}
+covid19_china <- covid19[covid19$Country.Region == 'China', ]
+
+head(covid19_china)
+```
+
+### Group by 'Country.Region' and 'Date', and calculate the sum of other columns
+```{r, results='hide'}
+covid19_collapse_province <- covid19 |>
+  group_by(Country.Region, Date) |>
+  summarise_all(sum) |>
+  ungroup()
+```
+
+### Subset for rows where 'Country.Region' is 'China', and select first few rows
+```{r}
+covid19_collapse_province_china <- covid19_collapse_province |>
+  filter(Country.Region == 'China')
+
+head(covid19_collapse_province_china)
+```
+
+### Summary of COVID-19 cases for each country
+```{r}
+covid19 <- covid19_collapse_province |>
+  group_by(`Country.Region`) |>  #groups the data frame by country, keeps the last 14 rows for each country
+  slice_tail(n = 14) |>
+  group_by(`Country.Region`) |>  #keeps only the last row for each country
+  slice_tail(n = 1) |>
+  ungroup()
+
+covid19
+```
+
+## Country Abbreviations
+
+### Rename the columns
+```{r, results='hide'}
+names(country_isos)[names(country_isos) == "English.short.name.lower.case"] <- "Country.Region"
+names(country_isos)[names(country_isos) == "Alpha.2.code"] <- "country_abbr"
+```
+
+### Subset the columns
+```{r}
+country_isos <- subset(country_isos, select = c("Country.Region", "country_abbr"))
+
+head(country_isos)
+```
+
+### Merge the data frames
+```{r, results='hide'}
+covid19 <- merge(covid19, country_isos, by = "Country.Region") |> na.omit()
+```
+
+### Display the first few rows
+```{r}
+head(covid19)
+```
+
+## Big Five Personality Data
+
+```{r, results='hide'}
+big5 <- read.csv("./data-final.csv", sep = "\t")
+
+positively_keyed <- c("EXT1", "EXT3", "EXT5", "EXT7", "EXT9",
+                      "EST1", "EST3", "EST5", "EST6", "EST7", "EST8", "EST9", "EST10",
+                      "AGR2", "AGR4", "AGR6", "AGR8", "AGR9", "AGR10",
+                      "CSN1", "CSN3", "CSN5", "CSN7", "CSN9", "CSN10",
+                      "OPN1", "OPN3", "OPN5", "OPN7", "OPN8", "OPN9", "OPN10")
+
+negatively_keyed <- c("EXT2", "EXT4", "EXT6", "EXT8", "EXT10",
+                      "EST2", "EST4",
+                      "AGR1", "AGR3", "AGR5", "AGR7",
+                      "CSN2", "CSN4", "CSN6", "CSN8",
+                      "OPN2", "OPN4", "OPN6")
+
+
+big5[, big5$negatively_keyed] <- 6 - big5[, big5$negatively_keyed]
+```
+
+### Country-Level Big 5 Aggregates
+```{r, warning=FALSE}
+big5_new <- big5 |>
+  count(country, name = "counts") |>
+  filter(counts > 1000) |>
+  arrange(desc(counts)) |>
+  inner_join(big5 |> select(country, positively_keyed, negatively_keyed), by = "country") |>
+  na.omit()
+
+cat("Number of countries:", n_distinct(big5_new$country), "\n")
+cat("List of countries:\n", unique(big5_new$country), "\n")
+```
+
+## Factor aggregation
+```{r, warning=FALSE}
+big5_country_averages <- big5_new |>
+  mutate(across(EXT1:OPN10, as.numeric)) |>
+  group_by(country) |>
+  summarize(EXT = mean(EXT1:EXT10, na.rm = TRUE),
+            EST = mean(EST1:EST10, na.rm = TRUE),
+            AGR = mean(AGR1:AGR10, na.rm = TRUE),
+            CSN = mean(CSN1:CSN10, na.rm = TRUE),
+            OPN = mean(OPN1:OPN10, na.rm = TRUE)) |>
+  ungroup()
+
+big5_country_averages
+```
+
+## Country-level averages
+```{r}
+top_5_ext_countries <- big5_country_averages |>
+  arrange(desc(EXT)) |>
+  head(5)
+
+ggplot(data = top_5_ext_countries, aes(x = EXT, y = country)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(x = "Extraversion Score", y = "Country", title = "Top 5 Countries by Extraversion Score") +
+  theme_minimal()
+```
+
+## Joining Big 5 Country Data to COVID-19 Data
+```{r, warning=FALSE}
+covid19_big5 <- merge(covid19, big5_country_averages, by.x = "country_abbr", by.y = "country")
+head(covid19_big5)
+
+factors <- c('EXT', 'EST', 'AGR', 'CSN', 'OPN')
+factor_names <- c('Extraversion', 'Emotional Stability', 'Agreeableness', 'Conscientiousness', 'Openness')
+
+for (i in seq_along(factors)) {
+  # Compute the correlation coefficient
+  corr <- cor.test(covid19_big5[,factors[i]], covid19_big5$ConfirmedCases)
+  text <- paste0("r = ", round(corr$estimate, 2), ", p = ", round(corr$p.value, 2))
+
+  # Create the plot
+  p <- ggplot(covid19_big5, aes_string(x=factors[i], y="ConfirmedCases")) +
+    geom_point() +
+    stat_smooth(method="lm") +
+    labs(title=paste0("Confirmed cases at 14 days after first 50 cases \n by average score on Big 5 factors ", factor_names[i], "\n", text),
+         x=factor_names[i], y="Confirmed Cases")
+  print(p)
+}
+```
+
+### without China- atypical outlier because it was where the outbreak started
+```{r}
+for (i in seq_along(factors)) {
+  # Compute the correlation coefficient without China
+  corr <- cor.test(subset(covid19_big5, country_abbr != "CN")[,factors[i]],
+                   subset(covid19_big5, country_abbr != "CN")$ConfirmedCases)
+  text <- paste0("r = ", round(corr$estimate, 2), ", p = ", round(corr$p.value, 2))
+
+  # Create the plot without China
+  p <- ggplot(subset(covid19_big5, country_abbr != "CN"), aes_string(x=factors[i], y="ConfirmedCases")) +
+    geom_point() +
+    stat_smooth(method="lm") +
+    labs(title=paste0("Confirmed cases at 14 days after first 50 cases \n by average score on Big 5 factors ", factor_names[i], "\n", text),
+         x=factor_names[i], y="Confirmed Cases")
+  print(p)
+}
+```
+
+### OPN
+```{r}
+covid19_big5 |>
+  select(country_abbr, OPN, ConfirmedCases, Country.Region) |> # creates a new data frame
+  arrange(desc(OPN)) |>
+  inner_join(country_isos, by = c("country_abbr" = "country_abbr")) |> # merges it with another data frame
+  select(-c(country_abbr, Country.Region.x)) # drops columns
+```
+
+## New graph
+### Select the columns of interest and arrange the rows by country
+```{r, results='hide'}
+covid19_big5_plot <- covid19_big5 |>
+  select(EXT, EST, AGR, CSN, OPN, Country.Region, ConfirmedCases) |>
+  arrange(Country.Region)
+
+covid19_big5_plot$ConfirmedCases <- as.numeric(covid19_big5_plot$ConfirmedCases)
+mat <- as.matrix(covid19_big5_plot[, -6]) # Exclude the last column (ConfirmedCases)
+rownames(mat) <- covid19_big5_plot$Country.Region
+```
+
+### Define custom color palette
+```{r, results='hide'}
+my_palette <- colorRampPalette(c("#FFFFFF", "#DEB887", "#795548"), space = "rgb")(n = 299)
+```
+
+### Define text
+```{r, results='hide'}
+#font_files <- font_files() |> tibble()
+#View(font_files)
+font_add(family = 'Cooper Black', regular = "C:/Windows/Fonts/COOPBL.TTF")
+showtext_auto()
+```
+
+### Create heatmap
+```{r, results='hide'}
+p1 <- heatmaply(mat,
+                dendrogram = "none",
+                xlab = "", ylab = "",
+                main = "",
+                scale = "column",
+                margins = c(60, 100, 40, 20),
+                colors = my_palette,
+                grid_color = "white",
+                grid_width = 0.00001,
+                titleX = FALSE,
+                hide_colorbar = FALSE,
+                branches_lwd = 0.1,
+                label_names = c("Country", "Trait", "Zscore"),
+                fontsize_row = 8, fontsize_col = 8,
+                labCol = colnames(mat),
+                labRow = rownames(mat),
+                heatmap_layers = list(theme(axis.line=element_blank(),
+                                            text=element_text(family="Cooper Black"))),
+                width = 1200, height = 1000)
+```
+
+### Convert to plotly object and add layout
+```{r}
+p1_ggplot <- ggplotly(p1, tooltip="label")
+p1_ggplot <- p1_ggplot |>
+  layout(title = list(text = "COVID-19 confirmed cases on 2020-03-24 and big 5 Z-scores - Country comparison\n<span style='font-size: 14px'>For more details, move your mouse over the squares</span>",
+                      font = list(size = 20, family = "Cooper Black"), y = 4),
+         xaxis = list(title = "Big 5 Z-scores and COVID-19", titlefont = list(size = 16, family = "Cooper Black")),
+         yaxis = list(title = list(text = "Country", titlefont = list(size = 16, family = "Cooper Black"), standoff = 5, y = -5)),
+         margin = list(t=100))
+p1_ggplot
+```
+
+## New graph 2
+
+### Matrix format
+```{r message=FALSE, warning=FALSE}
+mat2 <- covid19_big5_plot[, -ncol(covid19_big5_plot)]
+rownames(mat2) <- covid19_big5_plot[, ncol(covid19_big5_plot)]
+mat2 = mat2[-6]
+mat2 <- as.matrix(mat2)
+rownames(mat2)=covid19_big5_plot$Country.Region
+mat_melted<-melt(mat2)
+Confirmed_Cases <- c(covid19_big5_plot$ConfirmedCases,
+                     covid19_big5_plot$ConfirmedCases,
+                     covid19_big5_plot$ConfirmedCases,
+                     covid19_big5_plot$ConfirmedCases,
+                     covid19_big5_plot$ConfirmedCases)
+```
+
+### Create ggplot
+```{r pressure, warning=FALSE}
+showtext_auto()
+p2 <- ggplot(mat_melted, aes(x = Var2, y = Var1)) +
+  geom_point(aes(size = Confirmed_Cases, fill = value), shape = 21, color = "black") +
+  theme(panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA, size = 1),
+        axis.text.x = element_text(size = 12, family = "Cooper Black"),
+        axis.text.y = element_text(size = 12, family = "Cooper Black"),
+        axis.title = element_text(size = 16, family = "Cooper Black"),
+        legend.text = element_text(size = 12, family = "Cooper Black"),
+        legend.title = element_text(size = 16, family = "Cooper Black")) +
+  labs(x = "Big 5 Trait", y = "Country", size = "Confirmed Cases", fill = "Value",
+       title = "COVID-19 Confirmed Cases on 2020-03-24 and Big 5 Scores - Country Comparison") +
+  theme(plot.title = element_text(size = 18, family = "Cooper Black")) +
+  scale_fill_gradientn(colors = c("#FFFFFF", "#DEB887", "#795548"))
+
+print(p2)
+```
